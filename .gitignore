@@ -1,0 +1,17 @@
+# Local Claude config
+.claude/
+*.local.json
+
+# AI/generated session artifacts
+ai-artifacts/**/*.jsonl
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs/temp
+*.log
+tmp/
+temp/
