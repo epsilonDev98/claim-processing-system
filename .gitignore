@@ -9,7 +9,6 @@ ai-artifacts/**/*.jsonl
 .DS_Store
 Thumbs.db
 .vscode/
-.idea/
 
 # Logs/temp
 *.log
