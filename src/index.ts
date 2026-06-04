@@ -32,6 +32,7 @@ function main(): void {
 
   app.listen(port, () => {
     console.log(`claim-processing-system listening on port ${port}`);
+    console.log(`API docs at http://localhost:${port}/docs`);
   });
 }
 

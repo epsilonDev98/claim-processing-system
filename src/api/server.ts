@@ -10,10 +10,12 @@
  */
 
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
+import swaggerUi from 'swagger-ui-express';
 import { ZodError } from 'zod';
 import type { Container } from '../container';
 import { IllegalTransitionError } from '../domain/states';
 import { ConflictError, NotFoundError, NotPayableError, ValidationError } from '../services/errors';
+import { openApiDocument } from './openapi';
 import { registerRoutes } from './routes';
 
 export function createServer(container: Container): Express {
@@ -23,6 +25,12 @@ export function createServer(container: Container): Express {
   app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok', service: 'claim-processing-system' });
   });
+
+  // Interactive API docs (Swagger UI) at /docs; raw spec at /openapi.json.
+  app.get('/openapi.json', (_req, res) => {
+    res.status(200).json(openApiDocument);
+  });
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { customSiteTitle: 'Claim Processing API' }));
 
   registerRoutes(app, container);
 
