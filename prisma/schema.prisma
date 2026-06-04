@@ -1,0 +1,170 @@
+// Persistence schema — mirrors domain-model §3 entities 1:1.
+//
+// Invariants encoded here:
+//   * All money is stored as Int minor units (cents); never floats. (domain §10.1)
+//   * Adjudication is append-only: (line_id, sequence) is unique; exactly one is_current per line. (§2.1)
+//   * UsageLedgerEntry.amount_or_count is a signed Int (compensating entries are negative). (§5, §7)
+//   * Reason codes / line-id lists are JSON-encoded strings — SQLite has no array or JSON column type.
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Member {
+  memberId String @id @map("member_id")
+  name     String // PHI
+  dob      String
+
+  policies      Policy[]
+  claims        Claim[]
+  ledgerEntries UsageLedgerEntry[]
+
+  @@map("members")
+}
+
+model Policy {
+  policyId              String @id @map("policy_id")
+  memberId              String @map("member_id")
+  effectiveDate         String @map("effective_date")
+  terminationDate       String @map("termination_date")
+  planYear              Int    @map("plan_year")
+  annualDeductibleMinor Int    @map("annual_deductible_minor")
+  // Policy-level exclusion list (service categories), authored in the policy JSON (domain §4).
+  // JSON-encoded string array; SQLite has no native array type.
+  exclusions            String @default("[]")
+
+  member        Member             @relation(fields: [memberId], references: [memberId])
+  coverageRules CoverageRule[]
+  claims        Claim[]
+  ledgerEntries UsageLedgerEntry[]
+
+  @@map("policies")
+}
+
+model CoverageRule {
+  policyId             String  @map("policy_id")
+  serviceCategory      String  @map("service_category")
+  covered              Boolean
+  annualLimitMinor     Int?    @map("annual_limit_minor")
+  visitLimit           Int?    @map("visit_limit")
+  perIncidentMaxMinor  Int?    @map("per_incident_max_minor")
+  // Nullable: a non-covered rule carries only service_category + covered (no cost-share math). (§4)
+  coinsuranceRate      Float?  @map("coinsurance_rate")
+  copayMinor           Int?    @map("copay_minor")
+  // Present + billed above ⇒ pend for Review; absent ⇒ never pends. (§4)
+  reviewThresholdMinor Int?    @map("review_threshold_minor")
+
+  policy Policy @relation(fields: [policyId], references: [policyId])
+
+  // Natural key: exactly one promise per category per policy. No surrogate rule id. (§2.1, §4)
+  @@id([policyId, serviceCategory])
+  @@map("coverage_rules")
+}
+
+model Claim {
+  claimId       String   @id @map("claim_id")
+  memberId      String   @map("member_id")
+  policyId      String   @map("policy_id")
+  provider      String
+  dateOfService String   @map("date_of_service")
+  submittedAt   DateTime @map("submitted_at")
+  // Derived projection cache — written only by deriveClaimState, never set directly. (§6)
+  state         String
+
+  member   Member      @relation(fields: [memberId], references: [memberId])
+  policy   Policy      @relation(fields: [policyId], references: [policyId])
+  lines    ClaimLine[]
+  disputes Dispute[]
+
+  @@map("claims")
+}
+
+model ClaimLine {
+  lineId          String @id @map("line_id")
+  claimId         String @map("claim_id")
+  serviceCode     String @map("service_code")
+  serviceCategory String @map("service_category")
+  diagnosisCode   String @map("diagnosis_code") // PHI; descriptive only, not a rule input (§10.9)
+  billedMinor     Int    @map("billed_minor")
+  units           Int
+  state           String
+
+  claim         Claim              @relation(fields: [claimId], references: [claimId])
+  adjudications Adjudication[]
+  ledgerEntries UsageLedgerEntry[] @relation("LineLedger")
+
+  @@map("claim_lines")
+}
+
+model Adjudication {
+  adjudicationId         String   @id @map("adjudication_id")
+  lineId                 String   @map("line_id")
+  sequence               Int
+  isCurrent              Boolean  @map("is_current")
+  decisionCode           String   @map("decision_code")
+  // JSON-encoded ReasonCode[] (1..n).
+  reasonCodes            String   @map("reason_codes")
+  allowedMinor           Int      @map("allowed_minor")
+  deductibleAppliedMinor Int      @map("deductible_applied_minor")
+  coinsuranceMinor       Int      @map("coinsurance_minor")
+  copayMinor             Int      @map("copay_minor")
+  payableMinor           Int      @map("payable_minor")
+  memberRespMinor        Int      @map("member_resp_minor")
+  adjudicatedAt          DateTime @map("adjudicated_at")
+
+  line ClaimLine @relation(fields: [lineId], references: [lineId])
+
+  // Append-only: each (re-)adjudication gets the next sequence for the line.
+  @@unique([lineId, sequence])
+  @@index([lineId, isCurrent])
+  @@map("adjudications")
+}
+
+model UsageLedgerEntry {
+  entryId       String   @id @map("entry_id")
+  memberId      String   @map("member_id")
+  policyId      String   @map("policy_id")
+  period        Int
+  bucket        String
+  amountOrCount Int      @map("amount_or_count") // signed; compensating entries are negative
+  sourceLineId  String   @map("source_line_id")
+  createdAt     DateTime @map("created_at")
+
+  member Member    @relation(fields: [memberId], references: [memberId])
+  policy Policy    @relation(fields: [policyId], references: [policyId])
+  line   ClaimLine @relation("LineLedger", fields: [sourceLineId], references: [lineId])
+
+  @@index([memberId, period, bucket])
+  @@map("usage_ledger_entries")
+}
+
+model Dispute {
+  disputeId         String    @id @map("dispute_id")
+  claimId           String    @map("claim_id")
+  // JSON-encoded line-id array (Dispute↔ClaimLine targeting flattened; SQLite has no array type).
+  lineIds           String    @map("line_ids")
+  reason            String
+  state             String
+  resolutionOutcome String?   @map("resolution_outcome")
+  resolutionNote    String?   @map("resolution_note")
+  openedAt          DateTime  @map("opened_at")
+  resolvedAt        DateTime? @map("resolved_at")
+
+  claim Claim @relation(fields: [claimId], references: [claimId])
+
+  @@map("disputes")
+}
+
+model ExplanationCode {
+  code           String @id
+  shortMessage   String @map("short_message")
+  detailTemplate String @map("detail_template")
+  category       String
+
+  @@map("explanation_codes")
+}
