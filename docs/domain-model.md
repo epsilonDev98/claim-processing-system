@@ -99,15 +99,90 @@ erDiagram
     DISPUTE }o--o{ CLAIM_LINE : targets
     EXPLANATION_CODE ||--o{ ADJUDICATION : "referenced by"
 
-    MEMBER { string member_id PK; string name; date dob }
-    POLICY { string policy_id PK; string member_id FK; date effective_date; date termination_date; int plan_year; int annual_deductible_minor }
-    COVERAGE_RULE { string policy_id FK; string service_category PK; bool covered; int annual_limit_minor; int visit_limit; int per_incident_max_minor; decimal coinsurance_rate; int copay_minor; int review_threshold_minor }
-    CLAIM { string claim_id PK; string member_id FK; string policy_id FK; string provider; date date_of_service; datetime submitted_at; string state "derived; cache only" }
-    CLAIM_LINE { string line_id PK; string claim_id FK; string service_code; string service_category; string diagnosis_code "PHI"; int billed_minor; int units; string state }
-    ADJUDICATION { string adjudication_id PK; string line_id FK; int sequence; bool is_current; string decision_code; string reason_codes; int allowed_minor; int deductible_applied_minor; int coinsurance_minor; int copay_minor; int payable_minor; int member_resp_minor; datetime adjudicated_at }
-    USAGE_LEDGER { string entry_id PK; string member_id FK; string policy_id FK; int period; string bucket; int amount_or_count; string source_line_id; datetime created_at }
-    DISPUTE { string dispute_id PK; string claim_id FK; string reason; string state; string resolution_outcome; string resolution_note; datetime opened_at; datetime resolved_at }
-    EXPLANATION_CODE { string code PK; string short_message; string detail_template; string category }
+    MEMBER {
+        string member_id PK
+        string name
+        date dob
+    }
+    POLICY {
+        string policy_id PK
+        string member_id FK
+        date effective_date
+        date termination_date
+        int plan_year
+        int annual_deductible_minor
+    }
+    COVERAGE_RULE {
+        string policy_id FK
+        string service_category PK
+        bool covered
+        int annual_limit_minor
+        int visit_limit
+        int per_incident_max_minor
+        decimal coinsurance_rate
+        int copay_minor
+        int review_threshold_minor
+    }
+    CLAIM {
+        string claim_id PK
+        string member_id FK
+        string policy_id FK
+        string provider
+        date date_of_service
+        datetime submitted_at
+        string state "derived, cache only"
+    }
+    CLAIM_LINE {
+        string line_id PK
+        string claim_id FK
+        string service_code
+        string service_category
+        string diagnosis_code "PHI"
+        int billed_minor
+        int units
+        string state
+    }
+    ADJUDICATION {
+        string adjudication_id PK
+        string line_id FK
+        int sequence
+        bool is_current
+        string decision_code
+        string reason_codes
+        int allowed_minor
+        int deductible_applied_minor
+        int coinsurance_minor
+        int copay_minor
+        int payable_minor
+        int member_resp_minor
+        datetime adjudicated_at
+    }
+    USAGE_LEDGER {
+        string entry_id PK
+        string member_id FK
+        string policy_id FK
+        int period
+        string bucket
+        int amount_or_count
+        string source_line_id
+        datetime created_at
+    }
+    DISPUTE {
+        string dispute_id PK
+        string claim_id FK
+        string reason
+        string state
+        string resolution_outcome
+        string resolution_note
+        datetime opened_at
+        datetime resolved_at
+    }
+    EXPLANATION_CODE {
+        string code PK
+        string short_message
+        string detail_template
+        string category
+    }
 ```
 
 ### Relationships
