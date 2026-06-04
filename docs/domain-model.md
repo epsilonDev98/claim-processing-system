@@ -50,7 +50,7 @@ directly.**
 |---|---|---|---|
 | **Member** | Covered person; accumulator owner | `member_id`, `name` (PHI), `dob` | Limits/deductibles accumulate per member |
 | **Policy** | Contract: promises + period + deductible | `policy_id`, `member_id`, `effective_date`, `termination_date`, `plan_year`, `annual_deductible` | Eligibility = policy active on date of service |
-| **CoverageRule** | One coverage promise for a service category (authored as JSON, validated into a typed struct) | `rule_id`, `service_category`, `covered`, `annual_limit?`, `visit_limit?`, `per_incident_max?`, `coinsurance_rate`, `copay?`, `requires_review`, `review_threshold?` | The promise; carries limits as data, never consumed usage. Values only — no expressions, **and no explanation metadata** (reason codes are emitted by pipeline steps, see §4/§8) |
+| **CoverageRule** | One coverage promise for a service category (authored as JSON, validated into a typed struct) | `service_category` *(natural key — one promise per category)*, `covered`, `annual_limit?`, `visit_limit?`, `per_incident_max?`, `coinsurance_rate`, `copay?`, `review_threshold?` | The promise; carries policy terms as data, never consumed usage. Values only — no expressions, no surrogate rule id, no control flags, **and no explanation metadata** (a present `review_threshold` *is* the "pend above this amount" term; reason codes are emitted by pipeline steps, see §4/§8) |
 | **Claim** | Member's submitted request (header) | `claim_id`, `member_id`, `policy_id`, `provider`, `date_of_service`, `submitted_at`, `state` *(derived — see §6)* | The unit members submit/track; state is **derived** from lines |
 | **ClaimLine** | One billed service; atomic adjudication unit | `line_id`, `claim_id`, `service_code`, `service_category`, `diagnosis_code` (PHI), `billed_amount`, `units`, `state`, `current_adjudication` | Enables "3 covered, 1 denied, 1 review" |
 | **Adjudication** | Decision + math + reason codes for a line, **one record per (re-)adjudication** (append-only; latest is current) | `line_id`, `sequence`, `is_current`, `decision_code` (1), `reason_codes[]` (1..n), `allowed_amount`, `deductible_applied`, `coinsurance_amount`, `copay_amount`, `payable_amount`, `member_responsibility`, `adjudicated_at` | Keeps "why" + "how much" together **and preserves decision history across disputes** for audit. The member-facing `Explanation` is *derived* from `reason_codes` + catalog, not stored |
@@ -101,7 +101,7 @@ erDiagram
 
     MEMBER { string member_id PK; string name; date dob }
     POLICY { string policy_id PK; string member_id FK; date effective_date; date termination_date; int plan_year; int annual_deductible_minor }
-    COVERAGE_RULE { string rule_id PK; string policy_id FK; string service_category; bool covered; int annual_limit_minor; int visit_limit; int per_incident_max_minor; decimal coinsurance_rate; int copay_minor; bool requires_review; int review_threshold_minor }
+    COVERAGE_RULE { string policy_id FK; string service_category PK; bool covered; int annual_limit_minor; int visit_limit; int per_incident_max_minor; decimal coinsurance_rate; int copay_minor; int review_threshold_minor }
     CLAIM { string claim_id PK; string member_id FK; string policy_id FK; string provider; date date_of_service; datetime submitted_at; string state "derived; cache only" }
     CLAIM_LINE { string line_id PK; string claim_id FK; string service_code; string service_category; string diagnosis_code "PHI"; int billed_minor; int units; string state }
     ADJUDICATION { string adjudication_id PK; string line_id FK; int sequence; bool is_current; string decision_code; string reason_codes; int allowed_minor; int deductible_applied_minor; int coinsurance_minor; int copay_minor; int payable_minor; int member_resp_minor; datetime adjudicated_at }
@@ -151,18 +151,17 @@ resolved against the catalog; the catalog's completeness is checked once at star
   "policy_id": "POL-001",
   "plan_year": 2026,
   "annual_deductible": 50000,          // integer minor units = $500.00
-  "coverage_rules": [
+  "exclusions": ["EXPERIMENTAL"],      // policy-level carve-outs (denied even if the category is covered)
+  "coverage": [
     {
-      "rule_id": "CR-PT",
-      "service_category": "PHYSICAL_THERAPY",
+      "service_category": "PHYSICAL_THERAPY",   // natural key — exactly one promise per category
       "covered": true,
       "annual_limit": 400000,          // $4,000
       "coinsurance_rate": 0.20,
       "copay": 2500,                   // $25
-      "requires_review": false,
-      "review_threshold": null
+      "review_threshold": null         // present + billed above it ⇒ pend for review; absent ⇒ never pends
     },
-    { "rule_id": "CR-COSMETIC", "service_category": "COSMETIC", "covered": false }
+    { "service_category": "COSMETIC", "covered": false }
   ]
 }
 ```
@@ -175,7 +174,7 @@ and identical for every claim, never a `priority` field in the data.
 | **Eligibility** | Policy active on DOS? | policy dates, DOS | pass / **hard-deny** | DOS 2026‑06‑01, policy termed 2026‑05‑31 → `POLICY_INACTIVE` |
 | **Coverage** | Category covered? | service_category, `covered` | pass / **hard-deny** | `COSMETIC`, covered=false → `NOT_COVERED` |
 | **Exclusion** | Explicitly excluded? | category, exclusion list | pass / **hard-deny** | `EXPERIMENTAL` → `EXCLUDED_SERVICE` |
-| **Review** | Needs a human? | billed, `review_threshold`, `requires_review` | pass / **pend** | billed > $10,000 → `PENDED_FOR_REVIEW` |
+| **Review** | Needs a human? | billed, `review_threshold` | pass / **pend** | `review_threshold` set and billed > $10,000 → `PENDED_FOR_REVIEW` |
 | **Limit** | Remaining annual/visit/incident? | rule limits, ledger balance | `allowed` cap | PT limit $4,000, used $3,500 → cap $500 → `ANNUAL_LIMIT_APPLIED` |
 | **Deductible** | Apply remaining deductible | `annual_deductible`, ledger | reduces payable | $300 left → first $300 is member's |
 | **Cost share** | Copay + coinsurance | `copay`, `coinsurance_rate` | reduces payable | 20% coinsurance → plan pays 80% post-deductible |
@@ -342,7 +341,7 @@ templates** from the codes — it never invents reasons.
   "We paid part of the bill because your annual limit was reached." Breakdown: billed 12,000; remaining
   PT limit 3,500 → allowed 3,500; deductible 0; coinsurance 0 → **payable 3,500; member responsibility 8,500**.
 - **Denied** — decision `DENIED`, reasons `[EXCLUDED_SERVICE]`: "This service is not covered under your policy."
-  Trace: `[eligibility:pass, coverage:fail rule=EXCL_204]` → **payable 0**.
+  Trace: `[eligibility:pass, coverage:pass, exclusion:fail category=EXPERIMENTAL]` → **payable 0**.
 - **Manual review** — decision `NEEDS_REVIEW`, reasons `[PENDED_FOR_REVIEW]`: "This claim line needs manual
   review before a decision." Trace: `[review: billed 15,000 > threshold 10,000]` → **payable pending**.
 
