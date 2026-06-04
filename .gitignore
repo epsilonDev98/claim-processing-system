@@ -14,3 +14,17 @@ Thumbs.db
 *.log
 tmp/
 temp/
+
+# Node / TypeScript build output
+node_modules/
+dist/
+
+# Environment (keep .env.example committed)
+.env
+
+# Prisma / SQLite databases + generated client
+*.db
+*.db-journal
+prisma/dev.db*
+prisma/test.db*
+prisma/migrations/dev.db*
