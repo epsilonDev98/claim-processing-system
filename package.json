@@ -19,6 +19,9 @@
     "seed": "ts-node prisma/seed.ts",
     "lint": "tsc --noEmit -p tsconfig.json"
   },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
   "dependencies": {
     "@prisma/client": "^5.18.0",
     "dotenv": "^16.4.5",

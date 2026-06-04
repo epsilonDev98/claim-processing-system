@@ -28,19 +28,31 @@ export interface Policy {
 }
 
 /**
- * One coverage promise for a service category. Authored as JSON, validated into this struct.
- * `serviceCategory` is the natural key. A present `reviewThresholdMinor` is the "pend above
- * this amount" term; absent ⇒ never pends.
+ * One coverage promise for a service category, modelled as a discriminated union on `covered`
+ * (domain §4/§6). `serviceCategory` is the natural key.
+ *
+ * A covered category carries its cost-share term (`coinsuranceRate` is always present) plus
+ * optional limits/threshold. A non-covered category carries ONLY the natural key + the flag —
+ * a non-covered benefit has no cost-share math, so those fields cannot exist on it. The Coverage
+ * pipeline step narrows the union: once `rule.covered` is true, the cost-share fields are in scope.
  */
-export interface CoverageRule {
+export type CoverageRule = CoveredRule | NonCoveredRule;
+
+export interface CoveredRule {
   serviceCategory: string;
-  covered: boolean;
+  covered: true;
+  coinsuranceRate: number;
   annualLimitMinor?: number;
   visitLimit?: number;
   perIncidentMaxMinor?: number;
-  coinsuranceRate: number;
   copayMinor?: number;
+  /** A present `reviewThresholdMinor` is the "pend above this amount" term; absent ⇒ never pends. */
   reviewThresholdMinor?: number;
+}
+
+export interface NonCoveredRule {
+  serviceCategory: string;
+  covered: false;
 }
 
 /** The submitted request envelope. `state` is a derived cache (see §6 / deriveClaimState). */

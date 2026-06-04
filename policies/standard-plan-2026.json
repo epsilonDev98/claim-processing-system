@@ -1,0 +1,24 @@
+{
+  "policy_id": "POL-001",
+  "plan_year": 2026,
+  "annual_deductible": 50000,
+  "exclusions": ["EXPERIMENTAL"],
+  "coverage": [
+    { "service_category": "PREVENTIVE_CARE", "covered": true, "coinsurance_rate": 0 },
+    {
+      "service_category": "PHYSICAL_THERAPY",
+      "covered": true,
+      "coinsurance_rate": 0.2,
+      "annual_limit": 400000,
+      "copay": 2500
+    },
+    {
+      "service_category": "DIAGNOSTIC_IMAGING",
+      "covered": true,
+      "coinsurance_rate": 0.1,
+      "review_threshold": 1000000
+    },
+    { "service_category": "EXPERIMENTAL", "covered": true, "coinsurance_rate": 0.2 },
+    { "service_category": "COSMETIC", "covered": false }
+  ]
+}
