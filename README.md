@@ -6,7 +6,7 @@ Insurance claims adjudication service: a **fixed adjudication pipeline**, an **a
 - Adjudication is append-only: each (re-)adjudication adds a new row; exactly one is current per line.
 - Responses are PHI-minimizing: member names and line diagnosis codes are never returned.
 
-See [`docs/domain-model.md`](docs/domain-model.md) and [`docs/implementation-plan.md`](docs/implementation-plan.md) for the full design.
+See [`docs/domain-model.md`](docs/domain-model.md) and [`docs/detailed-design.md`](docs/detailed-design.md) for the full design.
 
 ---
 
