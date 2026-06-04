@@ -131,6 +131,139 @@ materialized balance later only when volume justifies it.
 
 ---
 
+## 3.1 Data Dictionary (tables, fields, accepted values)
+
+The persistence schema (`prisma/schema.prisma`) maps the §2.1 entities to nine SQLite tables 1:1.
+Column names below are the physical (snake_case) names; the TypeScript entities use the camelCase
+equivalents. **All `*_minor` columns are integer minor units (cents) — never floats.** SQLite has no
+array/JSON column type, so list fields (`reason_codes`, `line_ids`, `exclusions`) are stored as
+JSON-encoded strings.
+
+### `members` — covered person (accumulator owner)
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `member_id` | String **PK** | Stable identity a policy and ledger accumulate against | Opaque key, e.g. `M-001` |
+| `name` | String | Member's full name — **PHI**, never serialized in any API response | Free text, e.g. `Jane Doe` |
+| `dob` | String | Date of birth — PHI; descriptive, not a rule input | ISO date, e.g. `1985-04-12` |
+
+### `policies` — the contract (period + deductible)
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `policy_id` | String **PK** | The contract whose rules adjudicate a claim's lines | Opaque key, e.g. `POL-001` |
+| `member_id` | String **FK→members** | Owner; one member can hold policies over time | Existing `member_id`, e.g. `M-001` |
+| `effective_date` | String | Coverage start (**inclusive**) — eligibility lower bound | ISO date, e.g. `2026-01-01` |
+| `termination_date` | String | Coverage end (**inclusive**) — eligibility upper bound | ISO date, e.g. `2026-12-31` |
+| `plan_year` | Int | Year that scopes ledger accumulators (the ledger `period`) | 4-digit year, 1900–3000, e.g. `2026` |
+| `annual_deductible_minor` | Int | Amount the member pays before the plan pays | Non-negative integer cents, e.g. `50000` ($500.00) |
+| `exclusions` | String (JSON array) | Service categories carved out — denied even if otherwise covered | JSON string array, e.g. `["EXPERIMENTAL"]`; default `[]` |
+
+### `coverage_rules` — one coverage promise per category
+
+> Composite **PK `(policy_id, service_category)`** — `service_category` is the natural key, exactly one
+> promise per category, no surrogate id. A **non-covered** rule carries only the key + `covered:false`;
+> the cost-share columns are NULL (a non-covered benefit has no math).
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `policy_id` | String **PK/FK→policies** | The owning policy | e.g. `POL-001` |
+| `service_category` | String **PK** | Natural key matched against a line's category | e.g. `PHYSICAL_THERAPY`, `PREVENTIVE_CARE`, `DIAGNOSTIC_IMAGING`, `EXPERIMENTAL`, `COSMETIC` |
+| `covered` | Boolean | Covered-or-not discriminator (drives `COVERED` vs `NOT_COVERED`) | `true` / `false` |
+| `coinsurance_rate` | Float (nullable) | Member's % share of the post-deductible amount; required when covered | `0`–`1`, e.g. `0.2` (20%); NULL when not covered |
+| `annual_limit_minor` | Int? | Yearly cap on *allowed*; partial cap → `ANNUAL_LIMIT_APPLIED`, exhausted → `ANNUAL_LIMIT_REACHED` (deny) | Non-negative integer cents, e.g. `400000` ($4,000) |
+| `visit_limit` | Int? | Max visits/year — **persisted but not enforced** (deferred behavior) | Non-negative integer, e.g. `20` |
+| `per_incident_max_minor` | Int? | Per-line cap on *allowed* → `PER_INCIDENT_MAX_APPLIED` | Non-negative integer cents, e.g. `15000` |
+| `copay_minor` | Int? | Flat per-service fee → `COPAY_APPLIED` | Non-negative integer cents, e.g. `2500` ($25) |
+| `review_threshold_minor` | Int? | If `billed >` this, the line **pends** (`PENDED_FOR_REVIEW`); absent ⇒ never pends | Non-negative integer cents, e.g. `1000000` ($10,000) |
+
+### `claims` — the submitted request envelope (header)
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `claim_id` | String **PK** | Identity members submit/track | Server-generated UUID |
+| `member_id` | String **FK→members** | Who the claim is for | e.g. `M-001` |
+| `policy_id` | String **FK→policies** | Which contract applies | e.g. `POL-001` |
+| `provider` | String | Billing provider — descriptive, not a rule input | Free text, e.g. `Downtown Physio` |
+| `date_of_service` | String | When the service happened — drives the eligibility window check | ISO date, e.g. `2026-03-10` |
+| `submitted_at` | DateTime | When the claim was received | ISO datetime |
+| `state` | String | **Derived projection** of line states (cache only; written solely by `deriveClaimState`) | `SUBMITTED`, `UNDER_REVIEW`, `APPROVED`, `PARTIALLY_APPROVED`, `DENIED`, `PAID` |
+
+### `claim_lines` — one billed service (atomic adjudication unit)
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `line_id` | String **PK** | The unit that is adjudicated, disputed, paid | Server-generated UUID |
+| `claim_id` | String **FK→claims** | Owning claim | UUID |
+| `service_code` | String | CPT-like billed-service code; descriptive (adjudication keys on category) | e.g. `97110` |
+| `service_category` | String | Routing key → selects the coverage rule; unknown category ⇒ `NOT_COVERED` | e.g. `PHYSICAL_THERAPY` |
+| `diagnosis_code` | String | **PHI**; captured for the record, not a rule input; never serialized | e.g. `M54.5` or `''` |
+| `billed_minor` | Int | Amount the provider charged — starting point of the math | Non-negative integer cents, e.g. `25000` |
+| `units` | Int | Quantity billed (echoed; per-unit math not currently applied) | Positive integer, e.g. `1` |
+| `state` | String | Authoritative per-line state, written by the pipeline | `AWAITING_ADJUDICATION`, `NEEDS_REVIEW`, `APPROVED`, `PARTIALLY_APPROVED`, `DENIED`, `PAID` |
+
+### `adjudications` — append-only decision + math + "why"
+
+> **Append-only:** each (re-)adjudication inserts a row with the next `sequence`; exactly one row per
+> line has `is_current = true`. Unique on `(line_id, sequence)`.
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `adjudication_id` | String **PK** | Identity of this decision record | UUID |
+| `line_id` | String **FK→claim_lines** | The line decided | UUID |
+| `sequence` | Int | 1-based version; re-adjudication appends `prev+1` | `1`, `2`, … |
+| `is_current` | Boolean | Marks the live decision for the line (exactly one true) | `true` / `false` |
+| `decision_code` | String | **The outcome** — exactly one | `APPROVED`, `PARTIALLY_APPROVED`, `DENIED`, `NEEDS_REVIEW` |
+| `reason_codes` | String (JSON array) | **The cause(s)** — one or many; resolve to catalog text | Subset of: `COVERED`, `NOT_COVERED`, `EXCLUDED_SERVICE`, `POLICY_INACTIVE`, `DEDUCTIBLE_APPLIED`, `ANNUAL_LIMIT_APPLIED`, `ANNUAL_LIMIT_REACHED`, `COINSURANCE_APPLIED`, `COPAY_APPLIED`, `PENDED_FOR_REVIEW`, `PER_INCIDENT_MAX_APPLIED` — e.g. `["DEDUCTIBLE_APPLIED","COINSURANCE_APPLIED"]` |
+| `allowed_minor` | Int | Billed after limit caps; basis for deductible + cost-share (`0` on hard deny) | Non-negative integer cents |
+| `deductible_applied_minor` | Int | Portion of allowed applied to the deductible | Non-negative integer cents |
+| `coinsurance_minor` | Int | Member's % share (banker's rounded) | Non-negative integer cents |
+| `copay_minor` | Int | Flat fee applied | Non-negative integer cents |
+| `payable_minor` | Int | **What the plan pays** = allowed − deductible − coinsurance − copay (clamped ≥ 0) | Non-negative integer cents |
+| `member_resp_minor` | Int | What the member owes = billed − payable (`0` while pended) | Non-negative integer cents |
+| `adjudicated_at` | DateTime | When this decision was recorded | ISO datetime |
+
+### `usage_ledger_entries` — append-only consumed usage (signed)
+
+> Balances are **derived by summing** rows per bucket — there is no balance column. Reversals post a
+> **negative** entry; history is never edited. Entries written only on `APPROVED`/`PARTIALLY_APPROVED`.
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `entry_id` | String **PK** | Identity of the entry | UUID |
+| `member_id` | String **FK→members** | Whose accumulator | e.g. `M-001` |
+| `policy_id` | String **FK→policies** | Contract under which consumed | e.g. `POL-001` |
+| `period` | Int | Plan year scoping the bucket | e.g. `2026` |
+| `bucket` | String | Which accumulator this consumes | `DEDUCTIBLE` or `ANNUAL_LIMIT:<category>`, e.g. `ANNUAL_LIMIT:PHYSICAL_THERAPY` |
+| `amount_or_count` | Int (**signed**) | Consumption: positive = consumed, negative = compensating reversal | e.g. `25000` or `-25000` |
+| `source_line_id` | String **FK→claim_lines** | Line that caused the entry | UUID |
+| `created_at` | DateTime | When posted | ISO datetime |
+
+### `disputes` — member challenge + resolution
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `dispute_id` | String **PK** | Identity of the dispute | UUID |
+| `claim_id` | String **FK→claims** | Claim being challenged | UUID |
+| `line_ids` | String (JSON array) | Targeted lines (M:N flattened) | JSON string array of `line_id`, e.g. `["<lineId>"]` |
+| `reason` | String | Why the member disputes | Free text, e.g. `Wrong category.` |
+| `state` | String | Dispute lifecycle state | `OPEN`, `UNDER_REVIEW`, `RESOLVED`, `CLOSED`, `WITHDRAWN` |
+| `resolution_outcome` | String? | Verdict label — **descriptive only** (does not branch logic) | `UPHELD`, `OVERTURNED`, `PARTIALLY_OVERTURNED`; NULL until resolved |
+| `resolution_note` | String? | Resolution rationale | Free text; NULL until resolved |
+| `opened_at` | DateTime | When opened | ISO datetime |
+| `resolved_at` | DateTime? | When resolved | ISO datetime; NULL until resolved |
+
+### `explanation_codes` — reference catalog (reason code → text)
+
+| Column | Type | Meaning / significance | Accepted / possible values (example) |
+|---|---|---|---|
+| `code` | String **PK** | Reason code the row explains | A `ReasonCode`, e.g. `DEDUCTIBLE_APPLIED` |
+| `short_message` | String | One-line member summary | e.g. `Deductible applied.` |
+| `detail_template` | String | Template filled with amounts/category at read time | e.g. `{amount} was applied toward your annual deductible.` |
+| `category` | String | Grouping of the reason | `approval`, `denial`, `cost-share`, `pend` |
+
+---
+
 ## 4. Coverage Rule Design
 
 A `CoverageRule` **has no behavior** — every field is a value. So rules are **authored as JSON
