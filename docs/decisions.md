@@ -165,6 +165,9 @@ Reason codes are emitted in pipeline-evaluation order.
 These are deliberate omissions or things modeled-but-not-wired. Several are surfaced in the schema,
 state tables, or interfaces but have **no execution path** — worth knowing before relying on them.
 
+- **No web frontend.** An optional Next.js BFF / demo UI was considered but deliberately dropped; the
+  REST API plus **Swagger UI at `/docs`** is the demo and inspection surface. No browser-based client
+  exists.
 - **No authentication, authorization, or rate limiting.** Every endpoint is open. There is no notion
   of a caller identity, role, or tenant.
 - **`visit_limit` is accepted, persisted, and then ignored.** The schema validates it, the loader maps

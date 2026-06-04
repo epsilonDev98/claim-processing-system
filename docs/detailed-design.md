@@ -15,7 +15,7 @@
 | Persistence | Prisma + SQLite (in-memory SQLite for tests) |
 | Validation | Zod (rule-config loader **and** request bodies) |
 | Tests | Mocha + Chai + Sinon |
-| Frontend | Next.js — **very thin BFF** + minimal demo screens (optional walkthrough surface) |
+| Demo surface | REST API + **Swagger UI** (`/docs`) — no web frontend |
 
 ## Guiding constraints (from the model — repeated so they bind the code)
 
@@ -77,7 +77,6 @@ claim-processing-system/
 │   ├── unit/                         # S1,S2,S3,S6,S10,S11,S12,S13,S14
 │   ├── integration/                  # S4,S5,S7,S8,S9 (real ledger / in-memory SQLite)
 │   └── e2e/                          # E2E-1 lifecycle, E2E-2 dispute overturned (supertest over Express)
-├── web/                              # Next.js thin BFF + minimal demo UI
 ├── package.json  ·  tsconfig.json  ·  .mocharc.json  ·  .env
 ```
 
@@ -137,12 +136,6 @@ Each module below lists **Responsibility · Dependencies · Why it exists**.
   check (fail fast), then start Express.
 - **Dependencies:** everything above.
 - **Why:** One obvious place that assembles the app; nothing else news-up dependencies.
-
-### `web/` (Next.js thin BFF)
-- **Responsibility:** Minimal screens (submit a claim, view claim + line explanations, open/resolve a
-  dispute) proxying to the REST API.
-- **Dependencies:** the REST API only.
-- **Why:** A friendlier walkthrough surface for the demo; deliberately holds **no** business logic.
 
 ---
 
@@ -410,8 +403,8 @@ record, one `isCurrent`, ledger unchanged) and **S9** (overturned: re-adjudicati
 compensating-entry path).
 
 ### Commit 7 — API
-`api/` (server, routes, controllers, request-schemas, serializers), `container.ts`, `index.ts`; the
-`web/` Next.js thin BFF. **Tests (e2e, supertest):** **E2E-1** full lifecycle (submit→adjudicate→resolve
+`api/` (server, routes, controllers, request-schemas, serializers, OpenAPI spec + Swagger UI at `/docs`),
+`container.ts`, `index.ts`. **Tests (e2e, supertest):** **E2E-1** full lifecycle (submit→adjudicate→resolve
 review→pay) and **E2E-2** dispute-overturned round-trip.
 
 ### Commit 8 — Documentation
