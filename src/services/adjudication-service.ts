@@ -25,7 +25,7 @@ import type {
   ClaimRepository,
   PolicyRepository,
 } from '../repositories/interfaces';
-import { NotFoundError, NotPayableError } from './errors';
+import { ConflictError, NotFoundError, NotPayableError } from './errors';
 import type { LedgerService } from './ledger-service';
 
 export interface LineDecision {
@@ -184,7 +184,11 @@ export class AdjudicationService {
    * reconciles the ledger with SIGNED compensating entries (never double-consuming), and re-derives
    * the claim state. The claim re-enters UNDER_REVIEW for the re-adjudication. No new pipeline logic.
    */
-  async reAdjudicateLines(claimId: string, lineIds: readonly string[]): Promise<AdjudicationSummary> {
+  async reAdjudicateLines(
+    claimId: string,
+    lineIds: readonly string[],
+    options: { manuallyReviewed?: boolean } = {},
+  ): Promise<AdjudicationSummary> {
     const loaded = await this.claims.getWithLines(claimId);
     if (!loaded) {
       throw new NotFoundError(`Claim ${claimId} not found`);
@@ -233,6 +237,7 @@ export class AdjudicationService {
         exclusions,
         deductibleConsumedMinor: (balances.get(DEDUCTIBLE_BUCKET) ?? 0) - (priorForLine.get(DEDUCTIBLE_BUCKET) ?? 0),
         annualLimitConsumedMinor: (balances.get(limitBucket) ?? 0) - (priorForLine.get(limitBucket) ?? 0),
+        manuallyReviewed: options.manuallyReviewed ?? false,
       });
 
       // Guard only a real state change — a re-adjudication that reproduces the same line state
@@ -298,6 +303,26 @@ export class AdjudicationService {
     await this.claims.saveClaimState(claimId, claimState);
 
     return { claimId, claimState, lines: decisions };
+  }
+
+  /**
+   * Resolve a manual-review pend: a human has reviewed the line, so re-adjudicate it with the
+   * Review step lifted (it then yields a normal APPROVED/PARTIALLY_APPROVED/DENIED outcome with the
+   * proper cost-share math and ledger consumption). Only a NEEDS_REVIEW line can be resolved.
+   */
+  async resolveReview(claimId: string, lineId: string): Promise<AdjudicationSummary> {
+    const loaded = await this.claims.getWithLines(claimId);
+    if (!loaded) {
+      throw new NotFoundError(`Claim ${claimId} not found`);
+    }
+    const line = loaded.lines.find((l) => l.lineId === lineId);
+    if (!line) {
+      throw new NotFoundError(`Line ${lineId} not found on claim ${claimId}`);
+    }
+    if (line.state !== LineState.NEEDS_REVIEW) {
+      throw new ConflictError(`Line ${lineId} is not awaiting manual review`);
+    }
+    return this.reAdjudicateLines(claimId, [lineId], { manuallyReviewed: true });
   }
 
   /** Pay payable lines → PAID. Blocked while any line still needs review or is unadjudicated. */

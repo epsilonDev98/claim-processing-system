@@ -34,10 +34,12 @@
     "@types/mocha": "^10.0.7",
     "@types/node": "^20.14.0",
     "@types/sinon": "^17.0.3",
+    "@types/supertest": "^6.0.3",
     "chai": "^4.5.0",
     "mocha": "^10.7.3",
     "prisma": "^5.18.0",
     "sinon": "^18.0.0",
+    "supertest": "^7.2.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"
   }

@@ -24,3 +24,11 @@ export class NotPayableError extends Error {
     this.name = 'NotPayableError';
   }
 }
+
+/** The operation conflicts with the resource's current state (mapped to 409). */
+export class ConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}

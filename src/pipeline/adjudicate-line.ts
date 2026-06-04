@@ -43,6 +43,11 @@ export interface AdjudicationInput {
   /** Running balances for the member/period at the time this line is adjudicated. */
   deductibleConsumedMinor: number;
   annualLimitConsumedMinor: number;
+  /**
+   * When true, the Review step is skipped — a human has already reviewed the line, so it proceeds
+   * to the payable math instead of pending. Used when resolving a manual-review pend (§5).
+   */
+  manuallyReviewed?: boolean;
 }
 
 export interface AdjudicationOutcome {
@@ -78,8 +83,8 @@ export function adjudicateLine(input: AdjudicationInput): AdjudicationOutcome {
     return hardDeny(ReasonCode.EXCLUDED_SERVICE, billedMinor);
   }
 
-  // d. Review — pend and stop; no payment math runs.
-  if (needsReview(rule, billedMinor)) {
+  // d. Review — pend and stop; no payment math runs. Skipped once a human has reviewed the line.
+  if (!input.manuallyReviewed && needsReview(rule, billedMinor)) {
     return pend(billedMinor);
   }
 
