@@ -210,7 +210,7 @@ Submit a new claim with one or more lines. `diagnosisCode` is optional (defaults
 
 Runs the fixed pipeline over every line and appends a new current adjudication per line. **No request body.** Returns the adjudication summary.
 
-**Response `200`**
+**Response `200`** (real output for this line as the member's **first** claim against a freshly seeded DB — the $500 annual deductible is untouched, so the full $250 allowed goes toward the deductible and the plan pays $0):
 
 ```json
 {
@@ -221,18 +221,20 @@ Runs the fixed pipeline over every line and appends a new current adjudication p
       "lineId": "LN-1a2b...",
       "serviceCategory": "PHYSICAL_THERAPY",
       "decisionCode": "PARTIALLY_APPROVED",
-      "reasonCodes": ["COVERED", "DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED"],
+      "reasonCodes": ["DEDUCTIBLE_APPLIED", "COPAY_APPLIED"],
       "lineState": "PARTIALLY_APPROVED",
       "allowedMinor": 25000,
-      "deductibleAppliedMinor": 5000,
-      "coinsuranceMinor": 4000,
-      "copayMinor": 0,
-      "payableMinor": 16000,
-      "memberRespMinor": 9000
+      "deductibleAppliedMinor": 25000,
+      "coinsuranceMinor": 0,
+      "copayMinor": 2500,
+      "payableMinor": 0,
+      "memberRespMinor": 25000
     }
   ]
 }
 ```
+
+> Exact figures depend on the member's **accumulated deductible** at adjudication time. Once the $500 deductible is met, later claims show `deductibleAppliedMinor: 0` with coinsurance/copay applied and a non-zero `payableMinor`. `COVERED` appears only as a fallback when no cost-share/limit reason code applies (a fully-covered line).
 
 - `claimState` ∈ `SUBMITTED | UNDER_REVIEW | APPROVED | PARTIALLY_APPROVED | DENIED | PAID` (derived from line states).
 - `decisionCode` ∈ `APPROVED | PARTIALLY_APPROVED | DENIED | NEEDS_REVIEW`.
@@ -267,26 +269,26 @@ Returns the claim with its lines, each line's current adjudication, and a derive
         "sequence": 1,
         "isCurrent": true,
         "decisionCode": "PARTIALLY_APPROVED",
-        "reasonCodes": ["COVERED", "DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED"],
+        "reasonCodes": ["DEDUCTIBLE_APPLIED", "COPAY_APPLIED"],
         "allowedMinor": 25000,
-        "deductibleAppliedMinor": 5000,
-        "coinsuranceMinor": 4000,
-        "copayMinor": 0,
-        "payableMinor": 16000,
-        "memberRespMinor": 9000,
+        "deductibleAppliedMinor": 25000,
+        "coinsuranceMinor": 0,
+        "copayMinor": 2500,
+        "payableMinor": 0,
+        "memberRespMinor": 25000,
         "adjudicatedAt": "2026-03-11T09:00:00.000Z"
       },
       "explanation": {
-        "shortMessage": "Partially approved",
-        "detail": "Deductible and coinsurance were applied to this covered service.",
+        "shortMessage": "Deductible applied.",
+        "detail": "$250.00 was applied toward your annual deductible. A $25.00 copay applies to this service.",
         "breakdown": [
           { "label": "Billed", "amountMinor": 25000 },
           { "label": "Allowed", "amountMinor": 25000 },
-          { "label": "Deductible applied", "amountMinor": 5000 },
-          { "label": "After deductible", "amountMinor": 20000 },
-          { "label": "Coinsurance", "amountMinor": 4000 },
-          { "label": "Copay", "amountMinor": 0 },
-          { "label": "Payable", "amountMinor": 16000 }
+          { "label": "Deductible applied", "amountMinor": 25000 },
+          { "label": "After deductible", "amountMinor": 0 },
+          { "label": "Coinsurance", "amountMinor": 0 },
+          { "label": "Copay", "amountMinor": 2500 },
+          { "label": "Payable", "amountMinor": 0 }
         ]
       }
     }
@@ -309,28 +311,37 @@ Member's usage-ledger balances and append-only entries for the claim's plan year
   "memberId": "M-001",
   "period": 2026,
   "balances": {
-    "DEDUCTIBLE:2026": 5000,
-    "PHYSICAL_THERAPY:ANNUAL:2026": 16000
+    "DEDUCTIBLE": 25000,
+    "ANNUAL_LIMIT:PHYSICAL_THERAPY": 25000
   },
   "entries": [
     {
       "entryId": "LE-9c8d...",
-      "bucket": "PHYSICAL_THERAPY:ANNUAL:2026",
-      "amountOrCount": 16000,
+      "bucket": "DEDUCTIBLE",
+      "amountOrCount": 25000,
       "sourceLineId": "LN-1a2b...",
       "createdAt": "2026-03-11T09:00:05.000Z"
+    },
+    {
+      "entryId": "LE-a1b2...",
+      "bucket": "ANNUAL_LIMIT:PHYSICAL_THERAPY",
+      "amountOrCount": 25000,
+      "sourceLineId": "LN-1a2b...",
+      "createdAt": "2026-03-11T09:00:05.001Z"
     }
   ]
 }
 ```
 
-Bucket keys and balances reflect the seeded standard plan; reversals appear as additional **negative** `amountOrCount` entries (never edits).
+Buckets are `DEDUCTIBLE` and `ANNUAL_LIMIT:<serviceCategory>` (the plan year is the separate `period` field). Ledger entries are written only on `APPROVED`/`PARTIALLY_APPROVED`; reversals appear as additional **negative** `amountOrCount` entries (never edits).
 
 ---
 
 ### 6. `POST /claims/:claimId/pay`
 
 Pays the approved / partially-approved lines. **No request body.** Returns the same `AdjudicationSummary` shape as adjudicate, with `claimState` advancing to `PAID`.
+
+Paying a claim with **no payable lines fails with `409`** (NotPayable) — so a line fully consumed by the deductible (`payableMinor: 0`, as in examples 3–5) cannot be paid. The response below shows a line whose deductible was **already met** on a prior claim, leaving a non-zero `payableMinor`:
 
 **Response `200`**
 
@@ -343,20 +354,20 @@ Pays the approved / partially-approved lines. **No request body.** Returns the s
       "lineId": "LN-1a2b...",
       "serviceCategory": "PHYSICAL_THERAPY",
       "decisionCode": "PARTIALLY_APPROVED",
-      "reasonCodes": ["COVERED", "DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED"],
+      "reasonCodes": ["COINSURANCE_APPLIED", "COPAY_APPLIED"],
       "lineState": "PAID",
       "allowedMinor": 25000,
-      "deductibleAppliedMinor": 5000,
-      "coinsuranceMinor": 4000,
-      "copayMinor": 0,
-      "payableMinor": 16000,
-      "memberRespMinor": 9000
+      "deductibleAppliedMinor": 0,
+      "coinsuranceMinor": 5000,
+      "copayMinor": 2500,
+      "payableMinor": 17500,
+      "memberRespMinor": 7500
     }
   ]
 }
 ```
 
-Paying a claim with no payable lines fails with `409` (NotPayable). `PAID` is terminal.
+`PAID` is terminal — a paid line cannot be re-adjudicated or disputed.
 
 ---
 
@@ -446,14 +457,14 @@ Resolves a dispute. If `corrections` are supplied, the affected lines are correc
         "lineId": "LN-1a2b...",
         "serviceCategory": "PHYSICAL_THERAPY",
         "decisionCode": "PARTIALLY_APPROVED",
-        "reasonCodes": ["COVERED", "COINSURANCE_APPLIED"],
+        "reasonCodes": ["DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED", "COPAY_APPLIED"],
         "lineState": "PARTIALLY_APPROVED",
         "allowedMinor": 80000,
-        "deductibleAppliedMinor": 0,
-        "coinsuranceMinor": 16000,
-        "copayMinor": 0,
+        "deductibleAppliedMinor": 50000,
+        "coinsuranceMinor": 6000,
+        "copayMinor": 2500,
         "payableMinor": 21500,
-        "memberRespMinor": 16000
+        "memberRespMinor": 58500
       }
     ]
   }
@@ -498,13 +509,13 @@ Returns the dispute and the **full append-only adjudication history** per disput
         "sequence": 2,
         "isCurrent": true,
         "decisionCode": "PARTIALLY_APPROVED",
-        "reasonCodes": ["COVERED", "COINSURANCE_APPLIED"],
+        "reasonCodes": ["DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED", "COPAY_APPLIED"],
         "allowedMinor": 80000,
-        "deductibleAppliedMinor": 0,
-        "coinsuranceMinor": 16000,
-        "copayMinor": 0,
+        "deductibleAppliedMinor": 50000,
+        "coinsuranceMinor": 6000,
+        "copayMinor": 2500,
         "payableMinor": 21500,
-        "memberRespMinor": 16000,
+        "memberRespMinor": 58500,
         "adjudicatedAt": "2026-06-01T10:05:00.000Z"
       }
     ]
