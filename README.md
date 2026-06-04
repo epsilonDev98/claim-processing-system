@@ -124,20 +124,435 @@ The server logs `claim-processing-system listening on port <PORT>` on boot. It f
 
 ### Endpoint summary
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Liveness probe |
-| `POST` | `/claims` | Submit a new claim |
-| `GET` | `/claims/:claimId` | Get a claim with lines, current adjudications, and explanations |
-| `POST` | `/claims/:claimId/adjudicate` | Run the adjudication pipeline over all lines |
-| `GET` | `/claims/:claimId/ledger` | Member's usage-ledger balances and entries for the plan year |
-| `POST` | `/claims/:claimId/pay` | Pay approved lines |
-| `POST` | `/claims/:claimId/lines/:lineId/resolve-review` | Resolve a manual-review pend on a line |
-| `POST` | `/claims/:claimId/disputes` | Open a dispute against one or more lines |
-| `POST` | `/disputes/:disputeId/start-review` | Move a dispute `OPEN → UNDER_REVIEW` |
-| `POST` | `/disputes/:disputeId/resolve` | Resolve a dispute (optionally re-adjudicating with corrections) |
-| `GET` | `/disputes/:disputeId` | Get a dispute with per-line adjudication history |
-| `GET` | `/policies/:policyId` | Get a policy with coverage rules and exclusions |
+Listed in the order routes are registered in [`src/api/routes.ts`](src/api/routes.ts), which mirrors the typical claim lifecycle (submit → adjudicate → inspect → pay, then the dispute flow).
+
+| # | Method | Path | Description |
+|---|--------|------|-------------|
+| 1 | `GET` | `/health` | Liveness probe |
+| 2 | `POST` | `/claims` | Submit a new claim |
+| 3 | `POST` | `/claims/:claimId/adjudicate` | Run the adjudication pipeline over all lines |
+| 4 | `GET` | `/claims/:claimId` | Get a claim with lines, current adjudications, and explanations |
+| 5 | `GET` | `/claims/:claimId/ledger` | Member's usage-ledger balances and entries for the plan year |
+| 6 | `POST` | `/claims/:claimId/pay` | Pay approved lines |
+| 7 | `POST` | `/claims/:claimId/lines/:lineId/resolve-review` | Resolve a manual-review pend on a line |
+| 8 | `POST` | `/claims/:claimId/disputes` | Open a dispute against one or more lines |
+| 9 | `POST` | `/disputes/:disputeId/start-review` | Move a dispute `OPEN → UNDER_REVIEW` |
+| 10 | `POST` | `/disputes/:disputeId/resolve` | Resolve a dispute (optionally re-adjudicating with corrections) |
+| 11 | `GET` | `/disputes/:disputeId` | Get a dispute with per-line adjudication history |
+| 12 | `GET` | `/policies/:policyId` | Get a policy with coverage rules and exclusions |
+
+---
+
+## Endpoint reference (request & response payloads)
+
+All monetary fields are integer **minor units** (cents): `25000` = $250.00. Request bodies are validated with strict Zod schemas — **unknown fields are rejected with `400`**. Endpoints that take no body are `POST`s driven entirely by path params.
+
+Error responses share one shape: `{ "error": "<message>" }`. Status mapping (centralized in [`src/api/server.ts`](src/api/server.ts)): validation → `400`, not found → `404`, not-payable / conflict / illegal-transition → `409`.
+
+### 1. `GET /health`
+
+Liveness probe. No body.
+
+**Response `200`**
+
+```json
+{ "status": "ok", "service": "claim-processing-system" }
+```
+
+---
+
+### 2. `POST /claims`
+
+Submit a new claim with one or more lines. `diagnosisCode` is optional (defaults to `""`) and is **never returned** in responses (PHI minimization).
+
+**Request body**
+
+```json
+{
+  "memberId": "M-001",
+  "policyId": "POL-001",
+  "provider": "Downtown Physio",
+  "dateOfService": "2026-03-10",
+  "lines": [
+    {
+      "serviceCode": "97110",
+      "serviceCategory": "PHYSICAL_THERAPY",
+      "diagnosisCode": "M54.5",
+      "billedMinor": 25000,
+      "units": 1
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `memberId` | string | yes | Non-empty. Must match the policy's member. |
+| `policyId` | string | yes | Non-empty. |
+| `provider` | string | yes | Non-empty. |
+| `dateOfService` | string | yes | Non-empty (`YYYY-MM-DD`). |
+| `lines` | array | yes | At least one line. |
+| `lines[].serviceCode` | string | yes | Non-empty. |
+| `lines[].serviceCategory` | string | yes | Non-empty (e.g. `PHYSICAL_THERAPY`, `PREVENTIVE_CARE`). |
+| `lines[].diagnosisCode` | string | no | Defaults to `""`. PHI — never serialized back. |
+| `lines[].billedMinor` | integer | yes | ≥ 0, minor units. |
+| `lines[].units` | integer | yes | > 0. |
+
+**Response `201`**
+
+```json
+{ "claimId": "CLM-7f3a...", "state": "SUBMITTED" }
+```
+
+---
+
+### 3. `POST /claims/:claimId/adjudicate`
+
+Runs the fixed pipeline over every line and appends a new current adjudication per line. **No request body.** Returns the adjudication summary.
+
+**Response `200`**
+
+```json
+{
+  "claimId": "CLM-7f3a...",
+  "claimState": "PARTIALLY_APPROVED",
+  "lines": [
+    {
+      "lineId": "LN-1a2b...",
+      "serviceCategory": "PHYSICAL_THERAPY",
+      "decisionCode": "PARTIALLY_APPROVED",
+      "reasonCodes": ["COVERED", "DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED"],
+      "lineState": "PARTIALLY_APPROVED",
+      "allowedMinor": 25000,
+      "deductibleAppliedMinor": 5000,
+      "coinsuranceMinor": 4000,
+      "copayMinor": 0,
+      "payableMinor": 16000,
+      "memberRespMinor": 9000
+    }
+  ]
+}
+```
+
+- `claimState` ∈ `SUBMITTED | UNDER_REVIEW | APPROVED | PARTIALLY_APPROVED | DENIED | PAID` (derived from line states).
+- `decisionCode` ∈ `APPROVED | PARTIALLY_APPROVED | DENIED | NEEDS_REVIEW`.
+- `reasonCodes` ⊆ `COVERED, NOT_COVERED, EXCLUDED_SERVICE, POLICY_INACTIVE, DEDUCTIBLE_APPLIED, ANNUAL_LIMIT_APPLIED, ANNUAL_LIMIT_REACHED, COINSURANCE_APPLIED, COPAY_APPLIED, PENDED_FOR_REVIEW, PER_INCIDENT_MAX_APPLIED`.
+
+---
+
+### 4. `GET /claims/:claimId`
+
+Returns the claim with its lines, each line's current adjudication, and a derived explanation. PHI-minimized: member `name` and line `diagnosisCode` are omitted.
+
+**Response `200`**
+
+```json
+{
+  "claimId": "CLM-7f3a...",
+  "memberId": "M-001",
+  "policyId": "POL-001",
+  "provider": "Downtown Physio",
+  "dateOfService": "2026-03-10",
+  "state": "PARTIALLY_APPROVED",
+  "isDisputed": false,
+  "lines": [
+    {
+      "lineId": "LN-1a2b...",
+      "serviceCode": "97110",
+      "serviceCategory": "PHYSICAL_THERAPY",
+      "billedMinor": 25000,
+      "units": 1,
+      "state": "PARTIALLY_APPROVED",
+      "adjudication": {
+        "sequence": 1,
+        "isCurrent": true,
+        "decisionCode": "PARTIALLY_APPROVED",
+        "reasonCodes": ["COVERED", "DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED"],
+        "allowedMinor": 25000,
+        "deductibleAppliedMinor": 5000,
+        "coinsuranceMinor": 4000,
+        "copayMinor": 0,
+        "payableMinor": 16000,
+        "memberRespMinor": 9000,
+        "adjudicatedAt": "2026-03-11T09:00:00.000Z"
+      },
+      "explanation": {
+        "shortMessage": "Partially approved",
+        "detail": "Deductible and coinsurance were applied to this covered service.",
+        "breakdown": [
+          { "label": "Billed", "amountMinor": 25000 },
+          { "label": "Allowed", "amountMinor": 25000 },
+          { "label": "Deductible applied", "amountMinor": 5000 },
+          { "label": "After deductible", "amountMinor": 20000 },
+          { "label": "Coinsurance", "amountMinor": 4000 },
+          { "label": "Copay", "amountMinor": 0 },
+          { "label": "Payable", "amountMinor": 16000 }
+        ]
+      }
+    }
+  ]
+}
+```
+
+`adjudication` and `explanation` are `null` until the claim is adjudicated. `isDisputed` is derived from the existence of an open dispute, never stored.
+
+---
+
+### 5. `GET /claims/:claimId/ledger`
+
+Member's usage-ledger balances and append-only entries for the claim's plan year. Balances are **summed** from entries (no cached column).
+
+**Response `200`**
+
+```json
+{
+  "memberId": "M-001",
+  "period": 2026,
+  "balances": {
+    "DEDUCTIBLE:2026": 5000,
+    "PHYSICAL_THERAPY:ANNUAL:2026": 16000
+  },
+  "entries": [
+    {
+      "entryId": "LE-9c8d...",
+      "bucket": "PHYSICAL_THERAPY:ANNUAL:2026",
+      "amountOrCount": 16000,
+      "sourceLineId": "LN-1a2b...",
+      "createdAt": "2026-03-11T09:00:05.000Z"
+    }
+  ]
+}
+```
+
+Bucket keys and balances reflect the seeded standard plan; reversals appear as additional **negative** `amountOrCount` entries (never edits).
+
+---
+
+### 6. `POST /claims/:claimId/pay`
+
+Pays the approved / partially-approved lines. **No request body.** Returns the same `AdjudicationSummary` shape as adjudicate, with `claimState` advancing to `PAID`.
+
+**Response `200`**
+
+```json
+{
+  "claimId": "CLM-7f3a...",
+  "claimState": "PAID",
+  "lines": [
+    {
+      "lineId": "LN-1a2b...",
+      "serviceCategory": "PHYSICAL_THERAPY",
+      "decisionCode": "PARTIALLY_APPROVED",
+      "reasonCodes": ["COVERED", "DEDUCTIBLE_APPLIED", "COINSURANCE_APPLIED"],
+      "lineState": "PAID",
+      "allowedMinor": 25000,
+      "deductibleAppliedMinor": 5000,
+      "coinsuranceMinor": 4000,
+      "copayMinor": 0,
+      "payableMinor": 16000,
+      "memberRespMinor": 9000
+    }
+  ]
+}
+```
+
+Paying a claim with no payable lines fails with `409` (NotPayable). `PAID` is terminal.
+
+---
+
+### 7. `POST /claims/:claimId/lines/:lineId/resolve-review`
+
+Resolves a manual-review pend (`NEEDS_REVIEW`) on a single line by re-running adjudication for it. **No request body.** Returns the `AdjudicationSummary`.
+
+**Response `200`** — same shape as `POST /claims/:claimId/adjudicate`.
+
+---
+
+### 8. `POST /claims/:claimId/disputes`
+
+Opens a dispute against one or more lines of the claim.
+
+**Request body**
+
+```json
+{
+  "lineIds": ["LN-1a2b..."],
+  "reason": "Service was billed under the wrong category."
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `lineIds` | string[] | yes | At least one non-empty line id belonging to the claim. |
+| `reason` | string | yes | Non-empty. |
+
+**Response `201`**
+
+```json
+{ "disputeId": "DSP-4e5f...", "claimId": "CLM-7f3a...", "state": "OPEN" }
+```
+
+---
+
+### 9. `POST /disputes/:disputeId/start-review`
+
+Moves a dispute `OPEN → UNDER_REVIEW`. **No request body.**
+
+**Response `200`**
+
+```json
+{ "disputeId": "DSP-4e5f...", "state": "UNDER_REVIEW" }
+```
+
+---
+
+### 10. `POST /disputes/:disputeId/resolve`
+
+Resolves a dispute. If `corrections` are supplied, the affected lines are corrected and **re-adjudicated** through the same pipeline (a new adjudication row is appended per corrected line).
+
+**Request body**
+
+```json
+{
+  "outcome": "OVERTURNED",
+  "note": "Re-categorized to PHYSICAL_THERAPY and approved on dispute.",
+  "corrections": {
+    "LN-1a2b...": { "serviceCategory": "PHYSICAL_THERAPY" }
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `outcome` | enum | yes | `UPHELD \| OVERTURNED \| PARTIALLY_OVERTURNED`. Descriptive metadata; resolution re-adjudicates whatever corrections are supplied, identically for all outcomes. |
+| `note` | string | yes | Non-empty. |
+| `corrections` | object | no | Map of `lineId → correction`. Each correction may set any of `serviceCode`, `serviceCategory`, `diagnosisCode`, `billedMinor`, `units` (all optional, strict). Omit to resolve without re-adjudicating. |
+
+**Response `200`**
+
+```json
+{
+  "dispute": {
+    "disputeId": "DSP-4e5f...",
+    "state": "CLOSED",
+    "resolutionOutcome": "OVERTURNED",
+    "resolutionNote": "Re-categorized to PHYSICAL_THERAPY and approved on dispute."
+  },
+  "adjudication": {
+    "claimId": "CLM-7f3a...",
+    "claimState": "PARTIALLY_APPROVED",
+    "lines": [
+      {
+        "lineId": "LN-1a2b...",
+        "serviceCategory": "PHYSICAL_THERAPY",
+        "decisionCode": "PARTIALLY_APPROVED",
+        "reasonCodes": ["COVERED", "COINSURANCE_APPLIED"],
+        "lineState": "PARTIALLY_APPROVED",
+        "allowedMinor": 80000,
+        "deductibleAppliedMinor": 0,
+        "coinsuranceMinor": 16000,
+        "copayMinor": 0,
+        "payableMinor": 21500,
+        "memberRespMinor": 16000
+      }
+    ]
+  }
+}
+```
+
+---
+
+### 11. `GET /disputes/:disputeId`
+
+Returns the dispute and the **full append-only adjudication history** per disputed line (sequence 1 preserved, latest current).
+
+**Response `200`**
+
+```json
+{
+  "disputeId": "DSP-4e5f...",
+  "claimId": "CLM-7f3a...",
+  "lineIds": ["LN-1a2b..."],
+  "reason": "Service was billed under the wrong category.",
+  "state": "CLOSED",
+  "resolutionOutcome": "OVERTURNED",
+  "resolutionNote": "Re-categorized to PHYSICAL_THERAPY and approved on dispute.",
+  "openedAt": "2026-06-01T10:00:00.000Z",
+  "resolvedAt": "2026-06-01T10:05:00.000Z",
+  "adjudicationHistory": {
+    "LN-1a2b...": [
+      {
+        "sequence": 1,
+        "isCurrent": false,
+        "decisionCode": "DENIED",
+        "reasonCodes": ["NOT_COVERED"],
+        "allowedMinor": 0,
+        "deductibleAppliedMinor": 0,
+        "coinsuranceMinor": 0,
+        "copayMinor": 0,
+        "payableMinor": 0,
+        "memberRespMinor": 0,
+        "adjudicatedAt": "2026-06-01T09:30:00.000Z"
+      },
+      {
+        "sequence": 2,
+        "isCurrent": true,
+        "decisionCode": "PARTIALLY_APPROVED",
+        "reasonCodes": ["COVERED", "COINSURANCE_APPLIED"],
+        "allowedMinor": 80000,
+        "deductibleAppliedMinor": 0,
+        "coinsuranceMinor": 16000,
+        "copayMinor": 0,
+        "payableMinor": 21500,
+        "memberRespMinor": 16000,
+        "adjudicatedAt": "2026-06-01T10:05:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+`resolutionOutcome`, `resolutionNote`, and `resolvedAt` are present only once the dispute is resolved.
+
+---
+
+### 12. `GET /policies/:policyId`
+
+Returns a policy with its coverage rules and exclusions.
+
+**Response `200`**
+
+```json
+{
+  "policyId": "POL-001",
+  "memberId": "M-001",
+  "effectiveDate": "2026-01-01",
+  "terminationDate": "2026-12-31",
+  "planYear": 2026,
+  "annualDeductibleMinor": 50000,
+  "exclusions": ["EXPERIMENTAL"],
+  "coverage": [
+    { "serviceCategory": "PREVENTIVE_CARE", "covered": true, "coinsuranceRate": 0 },
+    {
+      "serviceCategory": "PHYSICAL_THERAPY",
+      "covered": true,
+      "coinsuranceRate": 0.2,
+      "annualLimitMinor": 400000,
+      "copayMinor": 2500
+    },
+    {
+      "serviceCategory": "DIAGNOSTIC_IMAGING",
+      "covered": true,
+      "coinsuranceRate": 0.1,
+      "reviewThresholdMinor": 1000000
+    },
+    { "serviceCategory": "EXPERIMENTAL", "covered": true, "coinsuranceRate": 0.2 },
+    { "serviceCategory": "COSMETIC", "covered": false }
+  ]
+}
+```
+
+`coverage` mirrors the seeded [`policies/standard-plan-2026.json`](policies/standard-plan-2026.json). A covered rule always carries `coinsuranceRate` and may carry optional `annualLimitMinor`, `copayMinor`, `perIncidentMaxMinor`, `reviewThresholdMinor`, and `visitLimit`; a non-covered rule carries only `serviceCategory` and `covered: false`. Returns `404` if the policy is unknown (e.g. database not seeded).
 
 ---
 
