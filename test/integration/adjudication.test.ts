@@ -111,6 +111,32 @@ describe('adjudication integration (assembled pipeline + in-memory ledger)', () 
     expect(await adjudicationLedgerEntries(sys.ledgerRepo, sys.memberId)).to.deep.equal([]);
   });
 
+  it('S3 — deductible + cost share writes DEDUCTIBLE += 50000 and ANNUAL_LIMIT:PT += 80000 (keyed to the line)', async () => {
+    const sys = buildSystem('M-002', 'POL-002'); // empty starting ledger (deductible unmet)
+
+    const { lines } = await sys.claimService.submit({
+      claimId: 'C-S3',
+      memberId: sys.memberId,
+      policyId: sys.policyId,
+      provider: 'PT Clinic',
+      dateOfService: '2026-06-01',
+      lines: [{ serviceCode: 'PT-1', serviceCategory: 'PHYSICAL_THERAPY', billedMinor: 80000, units: 1 }],
+    });
+
+    const summary = await sys.adjudicationService.adjudicateClaim('C-S3');
+
+    expect(summary.claimState).to.equal(ClaimState.PARTIALLY_APPROVED);
+    expect(summary.lines[0]!.payableMinor).to.equal(21500);
+    expect(summary.lines[0]!.memberRespMinor).to.equal(58500);
+
+    const written = await adjudicationLedgerEntries(sys.ledgerRepo, sys.memberId);
+    expect(written).to.have.length(2);
+    expect(written.every((e) => e.sourceLineId === lines[0]!.lineId)).to.equal(true);
+    const byBucket = new Map(written.map((e) => [e.bucket, e.amountOrCount]));
+    expect(byBucket.get(DEDUCTIBLE_BUCKET)).to.equal(50000);
+    expect(byBucket.get(annualLimitBucket('PHYSICAL_THERAPY'))).to.equal(80000);
+  });
+
   it('S5 — annual limit caps allowed → PARTIALLY_APPROVED, ledger ANNUAL_LIMIT:PT += 350000, then PAID', async () => {
     const sys = buildSystem('M-003', 'POL-003');
     await seedLedger(sys.ledgerRepo, sys.memberId, sys.policyId, DEDUCTIBLE_BUCKET, 50000);

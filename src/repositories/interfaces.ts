@@ -26,12 +26,23 @@ export interface PolicyRepository {
   getExclusionsForPolicy(policyId: string): Promise<string[]>;
 }
 
+/** A sanctioned correction to a line's inputs — applied only via an open dispute (§8). */
+export interface LineCorrection {
+  serviceCode?: string;
+  serviceCategory?: string;
+  diagnosisCode?: string;
+  billedMinor?: number;
+  units?: number;
+}
+
 export interface ClaimRepository {
   create(claim: Claim, lines: ClaimLine[]): Promise<Claim>;
   getWithLines(claimId: string): Promise<{ claim: Claim; lines: ClaimLine[] } | null>;
   /** Cache write only — the derived claim state (deriveClaimState is the sole computer). */
   saveClaimState(claimId: string, state: ClaimState): Promise<void>;
   saveLineState(lineId: string, state: LineState): Promise<void>;
+  /** Apply a sanctioned line-input correction (the only post-decision edit path; §8). */
+  applyLineCorrection(lineId: string, correction: LineCorrection): Promise<void>;
 }
 
 export interface AdjudicationRepository {

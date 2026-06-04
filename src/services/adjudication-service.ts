@@ -178,6 +178,128 @@ export class AdjudicationService {
     return { claimId, claimState, lines: decisions };
   }
 
+  /**
+   * Re-adjudicate specific (already-decided) lines — the dispute flow's entry point (§8). Unlike
+   * normal adjudication this DOES reprocess decided lines: it appends a new adjudication for each,
+   * reconciles the ledger with SIGNED compensating entries (never double-consuming), and re-derives
+   * the claim state. The claim re-enters UNDER_REVIEW for the re-adjudication. No new pipeline logic.
+   */
+  async reAdjudicateLines(claimId: string, lineIds: readonly string[]): Promise<AdjudicationSummary> {
+    const loaded = await this.claims.getWithLines(claimId);
+    if (!loaded) {
+      throw new NotFoundError(`Claim ${claimId} not found`);
+    }
+    const { claim, lines } = loaded;
+
+    const policy = await this.policies.getById(claim.policyId);
+    if (!policy) {
+      throw new NotFoundError(`Policy ${claim.policyId} not found`);
+    }
+    const rules = await this.policies.getRulesForPolicy(claim.policyId);
+    const exclusions = await this.policies.getExclusionsForPolicy(claim.policyId);
+    const rulesByCategory = new Map<string, CoverageRule>(rules.map((r) => [r.serviceCategory, r]));
+    const period = policy.planYear;
+    const targeted = new Set(lineIds);
+
+    await this.claims.saveClaimState(claimId, ClaimState.UNDER_REVIEW);
+
+    // Running totals from the persisted ledger, adjusted per re-adjudicated line.
+    const balances = await this.ledger.balances(claim.memberId, period);
+
+    const lineStates: LineState[] = [];
+    const decisions: LineDecision[] = [];
+
+    for (const line of lines) {
+      if (!targeted.has(line.lineId)) {
+        lineStates.push(line.state);
+        decisions.push(await this.decisionForLine(line, line.state));
+        continue;
+      }
+
+      // Re-adjudicate against balances EXCLUDING this line's own prior consumption, so the line's
+      // earlier usage is not double-counted against its own (recomputed) limit/deductible.
+      const priorForLine = await this.ledger.consumedByLine(claim.memberId, period, line.lineId);
+      const limitBucket = annualLimitBucket(line.serviceCategory);
+      const outcome = adjudicateLine({
+        billedMinor: line.billedMinor,
+        serviceCategory: line.serviceCategory,
+        dateOfService: claim.dateOfService,
+        policy: {
+          effectiveDate: policy.effectiveDate,
+          terminationDate: policy.terminationDate,
+          annualDeductibleMinor: policy.annualDeductibleMinor,
+        },
+        rule: rulesByCategory.get(line.serviceCategory),
+        exclusions,
+        deductibleConsumedMinor: (balances.get(DEDUCTIBLE_BUCKET) ?? 0) - (priorForLine.get(DEDUCTIBLE_BUCKET) ?? 0),
+        annualLimitConsumedMinor: (balances.get(limitBucket) ?? 0) - (priorForLine.get(limitBucket) ?? 0),
+      });
+
+      // Guard only a real state change — a re-adjudication that reproduces the same line state
+      // (e.g. S8 upheld DENIED→DENIED) is not a transition, just a new appended record.
+      if (line.state !== outcome.lineState) {
+        assertLineTransition(line.state, outcome.lineState);
+      }
+
+      const history = await this.adjudications.historyForLine(line.lineId);
+      const nextSequence = history.reduce((max, a) => Math.max(max, a.sequence), 0) + 1;
+      await this.adjudications.appendForLine({
+        adjudicationId: randomUUID(),
+        lineId: line.lineId,
+        sequence: nextSequence,
+        isCurrent: true,
+        decisionCode: outcome.decisionCode,
+        reasonCodes: outcome.reasonCodes,
+        allowedMinor: outcome.allowedMinor,
+        deductibleAppliedMinor: outcome.deductibleAppliedMinor,
+        coinsuranceMinor: outcome.coinsuranceMinor,
+        copayMinor: outcome.copayMinor,
+        payableMinor: outcome.payableMinor,
+        memberRespMinor: outcome.memberRespMinor,
+        adjudicatedAt: new Date().toISOString(),
+      });
+      await this.claims.saveLineState(line.lineId, outcome.lineState);
+
+      // Reconcile the ledger with signed compensating entries (positive newly-due, negative
+      // reversal). For a re-adjudication that consumes nothing new (S8), this posts nothing.
+      await this.ledger.reconcileLine({
+        memberId: claim.memberId,
+        policyId: claim.policyId,
+        period,
+        sourceLineId: line.lineId,
+        target: outcome.ledgerDeltas,
+      });
+
+      // Update running totals: replace this line's prior contribution with its new consumption.
+      for (const [bucket, amount] of priorForLine) {
+        balances.set(bucket, (balances.get(bucket) ?? 0) - amount);
+      }
+      for (const delta of outcome.ledgerDeltas) {
+        balances.set(delta.bucket, (balances.get(delta.bucket) ?? 0) + delta.amountMinor);
+      }
+
+      lineStates.push(outcome.lineState);
+      decisions.push({
+        lineId: line.lineId,
+        serviceCategory: line.serviceCategory,
+        decisionCode: outcome.decisionCode,
+        reasonCodes: outcome.reasonCodes,
+        lineState: outcome.lineState,
+        allowedMinor: outcome.allowedMinor,
+        deductibleAppliedMinor: outcome.deductibleAppliedMinor,
+        coinsuranceMinor: outcome.coinsuranceMinor,
+        copayMinor: outcome.copayMinor,
+        payableMinor: outcome.payableMinor,
+        memberRespMinor: outcome.memberRespMinor,
+      });
+    }
+
+    const claimState = deriveClaimState(lineStates);
+    await this.claims.saveClaimState(claimId, claimState);
+
+    return { claimId, claimState, lines: decisions };
+  }
+
   /** Pay payable lines → PAID. Blocked while any line still needs review or is unadjudicated. */
   async payClaim(claimId: string): Promise<AdjudicationSummary> {
     const loaded = await this.claims.getWithLines(claimId);

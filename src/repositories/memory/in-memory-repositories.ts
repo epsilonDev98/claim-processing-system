@@ -21,6 +21,7 @@ import type {
   AdjudicationRepository,
   ClaimRepository,
   DisputeRepository,
+  LineCorrection,
   MemberRepository,
   PolicyRepository,
   UsageLedgerRepository,
@@ -109,6 +110,16 @@ export class InMemoryClaimRepository implements ClaimRepository {
   async saveLineState(lineId: string, state: LineState): Promise<void> {
     const line = this.lineIndex.get(lineId);
     if (line) line.state = state;
+  }
+
+  async applyLineCorrection(lineId: string, correction: LineCorrection): Promise<void> {
+    const line = this.lineIndex.get(lineId);
+    if (!line) return;
+    if (correction.serviceCode !== undefined) line.serviceCode = correction.serviceCode;
+    if (correction.serviceCategory !== undefined) line.serviceCategory = correction.serviceCategory;
+    if (correction.diagnosisCode !== undefined) line.diagnosisCode = correction.diagnosisCode;
+    if (correction.billedMinor !== undefined) line.billedMinor = correction.billedMinor;
+    if (correction.units !== undefined) line.units = correction.units;
   }
 }
 

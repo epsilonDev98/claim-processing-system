@@ -16,6 +16,7 @@ import type {
   Dispute as PrismaDispute,
   Member as PrismaMember,
   Policy as PrismaPolicy,
+  Prisma,
   PrismaClient,
   UsageLedgerEntry as PrismaUsageLedgerEntry,
 } from '@prisma/client';
@@ -36,6 +37,7 @@ import type {
   AdjudicationRepository,
   ClaimRepository,
   DisputeRepository,
+  LineCorrection,
   MemberRepository,
   PolicyRepository,
   UsageLedgerRepository,
@@ -121,6 +123,17 @@ export class PrismaClaimRepository implements ClaimRepository {
 
   async saveLineState(lineId: string, state: LineState): Promise<void> {
     await this.prisma.claimLine.update({ where: { lineId }, data: { state } });
+  }
+
+  async applyLineCorrection(lineId: string, correction: LineCorrection): Promise<void> {
+    // Only include provided fields (exactOptionalPropertyTypes forbids assigning explicit undefined).
+    const data: Prisma.ClaimLineUpdateInput = {};
+    if (correction.serviceCode !== undefined) data.serviceCode = correction.serviceCode;
+    if (correction.serviceCategory !== undefined) data.serviceCategory = correction.serviceCategory;
+    if (correction.diagnosisCode !== undefined) data.diagnosisCode = correction.diagnosisCode;
+    if (correction.billedMinor !== undefined) data.billedMinor = correction.billedMinor;
+    if (correction.units !== undefined) data.units = correction.units;
+    await this.prisma.claimLine.update({ where: { lineId }, data });
   }
 }
 
