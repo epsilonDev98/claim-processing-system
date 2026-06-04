@@ -141,6 +141,50 @@ Listed in the order routes are registered in [`src/api/routes.ts`](src/api/route
 | 11 | `GET` | `/disputes/:disputeId` | Get a dispute with per-line adjudication history |
 | 12 | `GET` | `/policies/:policyId` | Get a policy with coverage rules and exclusions |
 
+> The numbering above is **route-registration order, not a mandatory checklist.** Only steps 2–4 run for every claim. **`resolve-review` (7) and the dispute endpoints (8–11) are conditional branches**, not sequential steps:
+> - `resolve-review` applies **only** to a line in `NEEDS_REVIEW` — i.e. a line that *pended*. A line pends only when `billedMinor` exceeds a category's `reviewThresholdMinor`; in the seeded plan only `DIAGNOSTIC_IMAGING` has one (`1000000` = $10,000). Calling it on any other line returns `409` (`"… is not awaiting manual review"`).
+> - The dispute endpoints apply only when a member contests a finalized line.
+
+### Call sequences
+
+Which endpoints you call depends on how the line is adjudicated. Pick the branch that matches the outcome:
+
+**A. Normal claim — line is approved/partially approved (the common path)**
+
+```
+POST /claims                 → 201, state SUBMITTED
+POST /claims/:id/adjudicate  → 200, line APPROVED | PARTIALLY_APPROVED
+GET  /claims/:id             → inspect lines, adjudication, explanation   (optional)
+GET  /claims/:id/ledger      → see deductible / annual-limit balances     (optional)
+POST /claims/:id/pay         → 200, state PAID                            (requires ≥1 payable line)
+```
+
+> `resolve-review` is **not** in this path. A `PHYSICAL_THERAPY` line never pends, so there is nothing to resolve — go straight from `adjudicate` to `pay`.
+
+**B. Pended claim — a line lands in `NEEDS_REVIEW` (e.g. `DIAGNOSTIC_IMAGING` billed > $10,000)**
+
+```
+POST /claims                                       → 201, state SUBMITTED
+POST /claims/:id/adjudicate                        → 200, line NEEDS_REVIEW, claim UNDER_REVIEW
+POST /claims/:id/lines/:lineId/resolve-review      → 200, re-adjudicates with review lifted →
+                                                          APPROVED | PARTIALLY_APPROVED | DENIED
+POST /claims/:id/pay                               → 200, state PAID (only if now payable)
+```
+
+> Here `resolve-review` is **required** before `pay` — `pay` returns `409` while any line is still `NEEDS_REVIEW`.
+
+**C. Dispute — a member contests a finalized line (uses its own claim, since `PAID` is terminal)**
+
+```
+POST /claims/:id/disputes                 → 201, dispute OPEN
+POST /disputes/:disputeId/start-review    → 200, dispute UNDER_REVIEW
+POST /disputes/:disputeId/resolve         → 200, re-adjudicates corrected line(s); dispute CLOSED
+GET  /disputes/:disputeId                 → 200, append-only adjudication history                (optional)
+POST /claims/:id/pay                       → 200, pay the now-approved line(s)                     (if applicable)
+```
+
+`GET /policies/:policyId` is reference data and can be called any time.
+
 ---
 
 ## Endpoint reference (request & response payloads)
